@@ -8,6 +8,7 @@ import express from 'express';
 import cors from 'cors';
 import { runClaude, saveImageToTemp, cleanupTempImage, type ClaudeResponse } from './claude-runner.js';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import metaApiRouter from './meta-api.js';
 
 const app = express();
 const PORT = process.env.PORT || 3002;
@@ -15,6 +16,9 @@ const PORT = process.env.PORT || 3002;
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '50mb' })); // Large limit for base64 images
+
+// Meta API routes (fetch history, schedule posts)
+app.use('/api/meta', metaApiRouter);
 
 // Initialize Gemini for image generation only
 const geminiApiKey = process.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY;

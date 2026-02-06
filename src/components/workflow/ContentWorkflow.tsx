@@ -54,6 +54,9 @@ export function ContentWorkflow({ campaignId }: ContentWorkflowProps) {
   const [showSettings, setShowSettings] = useState(false);
   const [selectedBatch, setSelectedBatch] = useState<1 | 2 | 3>(1);
   const [historyContent, setHistoryContent] = useState(''); // Previously posted content for context
+  const [clientNotes, setClientNotes] = useState(''); // Ongoing notes from client
+  const [metaToken, setMetaToken] = useState(''); // Meta API token
+  const [isFetchingMeta, setIsFetchingMeta] = useState(false);
 
   // Graphics generation state
   const [generatedGraphics, setGeneratedGraphics] = useState<GeneratedGraphic[]>([]);
@@ -396,18 +399,79 @@ export function ContentWorkflow({ campaignId }: ContentWorkflowProps) {
 
           {/* History import */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              Tidligere opslag (kontekst)
-            </label>
+            <div className="flex items-center justify-between mb-2">
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                Tidligere opslag (kontekst)
+              </label>
+              {metaToken && (
+                <button
+                  onClick={async () => {
+                    setIsFetchingMeta(true);
+                    try {
+                      const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:3002'}/api/meta/fetch-history`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ accessToken: metaToken, limit: 30 }),
+                      });
+                      const data = await response.json();
+                      if (data.success && data.historyText) {
+                        setHistoryContent(data.historyText);
+                      } else {
+                        alert('Fejl: ' + (data.error || 'Kunne ikke hente data'));
+                      }
+                    } catch (e) {
+                      alert('Fejl: ' + e);
+                    } finally {
+                      setIsFetchingMeta(false);
+                    }
+                  }}
+                  disabled={isFetchingMeta}
+                  className="text-xs px-2 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
+                >
+                  {isFetchingMeta ? 'Henter...' : 'Hent fra Meta'}
+                </button>
+              )}
+            </div>
             <textarea
               value={historyContent}
               onChange={(e) => setHistoryContent(e.target.value)}
-              placeholder="Paste dine tidligere opslag her. Systemet bruger dem til at undgå gentagelser og bygge videre på narrativet..."
+              placeholder="Paste dine tidligere opslag her, eller brug 'Hent fra Meta' knappen..."
               className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white placeholder-gray-400 text-sm"
               rows={4}
             />
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
               {historyContent ? `${historyContent.split('\n').filter(l => l.trim()).length} linjer indlæst` : 'Valgfrit - hjælper systemet med at undgå gentagelser'}
+            </p>
+          </div>
+
+          {/* Client notes */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+              Løbende noter fra kunden
+            </label>
+            <textarea
+              value={clientNotes}
+              onChange={(e) => setClientNotes(e.target.value)}
+              placeholder="Tilføj noter fra kunden her... F.eks. 'Vi har lukket d. 14 feb', 'Ny ret på menuen', etc."
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white placeholder-gray-400 text-sm"
+              rows={2}
+            />
+          </div>
+
+          {/* Meta API Token */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+              Meta Page Access Token
+            </label>
+            <input
+              type="password"
+              value={metaToken}
+              onChange={(e) => setMetaToken(e.target.value)}
+              placeholder="EAA..."
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white placeholder-gray-400 text-sm font-mono"
+            />
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              Bruges til at hente historik og schedule posts til Business Suite
             </p>
           </div>
         </div>

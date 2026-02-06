@@ -3,7 +3,7 @@
  * Now uses Claude Code via backend API instead of Gemini
  */
 
-import { BRAND_CONTEXT, getPhaseStrategy } from '../lib/brandContext';
+import { BRAND_CONTEXT } from '../lib/brandContext';
 import type { Phase, HookType, CTAType } from '../types';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3002';

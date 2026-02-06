@@ -1,5 +1,5 @@
 import { useCallback } from 'react';
-import { Check, Trash2, Eye, Sparkles } from 'lucide-react';
+import { Check, Trash2, Eye, Sparkles, Ban } from 'lucide-react';
 import { useImageStore, type DisplayImage } from '../../stores';
 
 interface ImageGridProps {
@@ -8,8 +8,18 @@ interface ImageGridProps {
 }
 
 export function ImageGrid({ onImageClick, selectable = true }: ImageGridProps) {
-  const { images, selectedIds, toggleImageSelection, selectAll, deselectAll, deleteSelected } =
-    useImageStore();
+  const { 
+    images, 
+    selectedIds, 
+    externallyUsedIds,
+    toggleImageSelection, 
+    selectAll, 
+    deselectAll, 
+    deleteSelected,
+    toggleExternallyUsed,
+    markSelectedAsExternallyUsed,
+    clearExternallyUsed,
+  } = useImageStore();
 
   const handleImageClick = useCallback(
     (image: DisplayImage, e: React.MouseEvent) => {
@@ -24,6 +34,14 @@ export function ImageGrid({ onImageClick, selectable = true }: ImageGridProps) {
     [selectable, toggleImageSelection, onImageClick]
   );
 
+  const handleMarkUsedClick = useCallback(
+    (e: React.MouseEvent, imageId: string) => {
+      e.stopPropagation();
+      toggleExternallyUsed(imageId);
+    },
+    [toggleExternallyUsed]
+  );
+
   if (images.length === 0) {
     return (
       <div className="text-center py-12 text-gray-500 dark:text-gray-400">
@@ -35,40 +53,62 @@ export function ImageGrid({ onImageClick, selectable = true }: ImageGridProps) {
   }
 
   const selectedCount = selectedIds.size;
+  const usedCount = externallyUsedIds.size;
+  const availableImages = images.filter(img => !externallyUsedIds.has(img.id));
 
   return (
     <div className="space-y-4">
       {selectable && (
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-3">
             <span className="text-sm text-gray-600 dark:text-gray-400">
-              {images.length} billeder {selectedCount > 0 && `(${selectedCount} valgt)`}
+              {availableImages.length} tilgængelige
+              {usedCount > 0 && <span className="text-orange-500"> ({usedCount} brugt tidligere)</span>}
+              {selectedCount > 0 && ` • ${selectedCount} valgt`}
             </span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             {selectedCount > 0 ? (
               <>
+                <button
+                  onClick={markSelectedAsExternallyUsed}
+                  className="flex items-center gap-1 text-sm text-orange-600 hover:text-orange-700 dark:text-orange-400"
+                  title="Marker som allerede brugt"
+                >
+                  <Ban className="w-4 h-4" />
+                  Marker som brugt
+                </button>
                 <button
                   onClick={deselectAll}
                   className="text-sm text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200"
                 >
-                  Fravælg alle
+                  Fravælg
                 </button>
                 <button
                   onClick={deleteSelected}
                   className="flex items-center gap-1 text-sm text-red-600 hover:text-red-700 dark:text-red-400"
                 >
                   <Trash2 className="w-4 h-4" />
-                  Slet valgte
+                  Slet
                 </button>
               </>
             ) : (
-              <button
-                onClick={selectAll}
-                className="text-sm text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200"
-              >
-                Vælg alle
-              </button>
+              <>
+                {usedCount > 0 && (
+                  <button
+                    onClick={clearExternallyUsed}
+                    className="text-sm text-orange-600 hover:text-orange-700 dark:text-orange-400"
+                  >
+                    Nulstil "brugt"
+                  </button>
+                )}
+                <button
+                  onClick={selectAll}
+                  className="text-sm text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200"
+                >
+                  Vælg alle
+                </button>
+              </>
             )}
           </div>
         </div>
@@ -77,6 +117,7 @@ export function ImageGrid({ onImageClick, selectable = true }: ImageGridProps) {
       <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 gap-2">
         {images.map((image) => {
           const isSelected = selectedIds.has(image.id);
+          const isExternallyUsed = externallyUsedIds.has(image.id);
           const hasAnalysis = !!image.analysisId;
 
           return (
@@ -86,6 +127,7 @@ export function ImageGrid({ onImageClick, selectable = true }: ImageGridProps) {
               className={`
                 relative aspect-square rounded-lg overflow-hidden cursor-pointer
                 transition-all duration-200 group
+                ${isExternallyUsed ? 'opacity-50' : ''}
                 ${isSelected
                   ? 'ring-2 ring-blue-500 ring-offset-2 dark:ring-offset-gray-900'
                   : 'hover:ring-2 hover:ring-gray-300 dark:hover:ring-gray-600'
@@ -125,23 +167,48 @@ export function ImageGrid({ onImageClick, selectable = true }: ImageGridProps) {
                 </div>
               )}
 
+              {/* Externally used indicator - clickable to toggle */}
+              <button
+                onClick={(e) => handleMarkUsedClick(e, image.id)}
+                className={`
+                  absolute top-2 right-2 w-6 h-6 rounded-full
+                  flex items-center justify-center transition-all
+                  ${isExternallyUsed 
+                    ? 'bg-orange-500 text-white' 
+                    : 'bg-white/80 text-gray-400 opacity-0 group-hover:opacity-100'
+                  }
+                `}
+                title={isExternallyUsed ? 'Marker som ikke brugt' : 'Marker som allerede brugt'}
+              >
+                {isExternallyUsed ? <Ban className="w-3 h-3" /> : <Ban className="w-3 h-3" />}
+              </button>
+
               {/* Analysis indicator */}
-              {hasAnalysis && (
-                <div className="absolute top-2 right-2 w-6 h-6 rounded-full bg-green-500 flex items-center justify-center">
+              {hasAnalysis && !isExternallyUsed && (
+                <div className="absolute bottom-2 right-2 w-5 h-5 rounded-full bg-green-500 flex items-center justify-center">
                   <Sparkles className="w-3 h-3 text-white" />
                 </div>
               )}
 
-              {/* Filename on hover */}
-              <div
-                className="
-                  absolute bottom-0 left-0 right-0 p-2
-                  bg-gradient-to-t from-black/60 to-transparent
-                  opacity-0 group-hover:opacity-100 transition-opacity
-                "
-              >
-                <p className="text-xs text-white truncate">{image.originalName}</p>
-              </div>
+              {/* Externally used banner */}
+              {isExternallyUsed && (
+                <div className="absolute bottom-0 left-0 right-0 bg-orange-500 text-white text-xs py-1 text-center">
+                  Allerede brugt
+                </div>
+              )}
+
+              {/* Filename on hover (only if not externally used) */}
+              {!isExternallyUsed && (
+                <div
+                  className="
+                    absolute bottom-0 left-0 right-0 p-2
+                    bg-gradient-to-t from-black/60 to-transparent
+                    opacity-0 group-hover:opacity-100 transition-opacity
+                  "
+                >
+                  <p className="text-xs text-white truncate">{image.originalName}</p>
+                </div>
+              )}
             </div>
           );
         })}

@@ -24,6 +24,7 @@ export interface DisplayImage {
 interface ImageState {
   images: DisplayImage[];
   selectedIds: Set<string>;
+  externallyUsedIds: Set<string>; // Images already used in manually posted content
   isLoading: boolean;
   uploadProgress: { current: number; total: number } | null;
   error: string | null;
@@ -39,11 +40,17 @@ interface ImageState {
   deleteImage: (id: string) => Promise<void>;
   deleteSelected: () => Promise<void>;
   cleanup: () => void;
+  
+  // Externally used tracking
+  toggleExternallyUsed: (id: string) => void;
+  markSelectedAsExternallyUsed: () => void;
+  clearExternallyUsed: () => void;
 }
 
 export const useImageStore = create<ImageState>((set, get) => ({
   images: [],
   selectedIds: new Set(),
+  externallyUsedIds: new Set(),
   isLoading: false,
   uploadProgress: null,
   error: null,
@@ -208,5 +215,31 @@ export const useImageStore = create<ImageState>((set, get) => ({
       revokeImageUrl(img.url);
       if (img.thumbnailUrl) revokeImageUrl(img.thumbnailUrl);
     }
+  },
+
+  // Toggle whether an image is marked as externally used
+  toggleExternallyUsed: (id: string) => {
+    set((state) => {
+      const newUsed = new Set(state.externallyUsedIds);
+      if (newUsed.has(id)) {
+        newUsed.delete(id);
+      } else {
+        newUsed.add(id);
+      }
+      return { externallyUsedIds: newUsed };
+    });
+  },
+
+  // Mark all selected images as externally used
+  markSelectedAsExternallyUsed: () => {
+    set((state) => ({
+      externallyUsedIds: new Set([...state.externallyUsedIds, ...state.selectedIds]),
+      selectedIds: new Set(),
+    }));
+  },
+
+  // Clear all externally used markings
+  clearExternallyUsed: () => {
+    set({ externallyUsedIds: new Set() });
   },
 }));

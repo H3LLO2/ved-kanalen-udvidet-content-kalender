@@ -53,6 +53,7 @@ export function ContentWorkflow({ campaignId }: ContentWorkflowProps) {
   const [currentStep, setCurrentStep] = useState<WorkflowStep>('upload');
   const [showSettings, setShowSettings] = useState(false);
   const [selectedBatch, setSelectedBatch] = useState<1 | 2 | 3>(1);
+  const [historyContent, setHistoryContent] = useState(''); // Previously posted content for context
 
   // Graphics generation state
   const [generatedGraphics, setGeneratedGraphics] = useState<GeneratedGraphic[]>([]);
@@ -147,7 +148,7 @@ export function ContentWorkflow({ campaignId }: ContentWorkflowProps) {
         phase,
         batchInfo.days,
         segment,
-        '' // history (empty for now)
+        historyContent // Previously posted content for context
       );
 
       if (!planResult.success || !planResult.output) {
@@ -392,6 +393,23 @@ export function ContentWorkflow({ campaignId }: ContentWorkflowProps) {
               {selectedBatch === 3 && 'Etablering og hverdagsrutiner - 14 dage.'}
             </p>
           </div>
+
+          {/* History import */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+              Tidligere opslag (kontekst)
+            </label>
+            <textarea
+              value={historyContent}
+              onChange={(e) => setHistoryContent(e.target.value)}
+              placeholder="Paste dine tidligere opslag her. Systemet bruger dem til at undgå gentagelser og bygge videre på narrativet..."
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white placeholder-gray-400 text-sm"
+              rows={4}
+            />
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              {historyContent ? `${historyContent.split('\n').filter(l => l.trim()).length} linjer indlæst` : 'Valgfrit - hjælper systemet med at undgå gentagelser'}
+            </p>
+          </div>
         </div>
       )}
 
@@ -511,7 +529,30 @@ export function ContentWorkflow({ campaignId }: ContentWorkflowProps) {
             )}
           </div>
 
-          <PostList posts={posts} images={images} onCaptionChange={handleCaptionChange} />
+          <PostList 
+            posts={posts} 
+            images={images} 
+            onCaptionChange={handleCaptionChange}
+            onPostsRegenerated={(regeneratedPosts) => {
+              // Update each regenerated post in the store
+              for (const post of regeneratedPosts) {
+                updatePost(post.id, {
+                  seed: post.seed,
+                  caption: post.caption,
+                  postingTime: post.postingTime,
+                  reasoning: post.reasoning,
+                });
+              }
+            }}
+            imageAnalyses={useGenerationStore.getState().analyses.map(a => ({
+              id: a.id,
+              content: a.content,
+              mood: a.mood,
+              strategicFit: a.strategicFit,
+            }))}
+            phase={currentCampaign?.currentPhase || 'ESTABLISHMENT'}
+            history={historyContent}
+          />
 
           {/* Graphics Generation Section */}
           <div className="mt-8 pt-6 border-t border-gray-200 dark:border-gray-700">

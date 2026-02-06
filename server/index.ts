@@ -267,6 +267,19 @@ KRITISKE REGLER:
    - Som en ven der fortæller om sin restaurant
    - Ingen marketing-bullshit
 
+5. BILLEDER - VIGTIGT:
+   - Billedet er ILLUSTRATION, ikke emnet
+   - BESKRIV ALDRIG hvad vi ser på billedet ("På billedet ser vi...")
+   - Brug billedets STEMNING som inspiration, ikke dets INDHOLD
+   - Captionen fortæller EN HISTORIE - billedet understøtter den
+   - Tænk: "Hvad vil jeg fortælle?" IKKE "Hvad viser billedet?"
+
+EKSEMPEL PÅ DÅRLIGT (for literal):
+"På billedet ser vi en nymalet væg i hvid. Malerarbejdet er i gang..."
+
+EKSEMPEL PÅ GODT (storytelling):
+"Væggene er færdige. Hvidt over det hele. Det begynder sgu at ligne noget."
+
 Kernesætning: "Vi lover ikke at være alt for alle. Men vi lover at være et sted."`;
 
 app.post('/api/voice', async (req, res) => {
@@ -296,9 +309,9 @@ app.post('/api/voice', async (req, res) => {
 
     const prompt = `Skriv et Facebook/Instagram opslag på dansk for Dag ${dayNumber || '?'}.
 
-SEED (ide): ${seed}
+SEED (ide/tema): ${seed}
 
-BILLEDE-KONTEKST: ${imageContext}
+BILLEDE-STEMNING (brug som inspiration, IKKE som emne): ${imageContext}
 
 FASE: ${phase}
 ${hookType ? `HOOK TIP: ${hookHints[hookType] || hookType}` : ''}
@@ -313,6 +326,7 @@ KRAV:
 - 0-4 emojis naturligt placeret
 - "sgu" maks 1 gang per 5-10 opslag
 - Brug ALDRIG forbudte ord
+- BESKRIV ALDRIG billedet direkte - fortæl en historie i stedet
 
 Skriv opslaget nu:`;
 
@@ -353,6 +367,211 @@ Skriv opslaget nu:`;
     });
   } catch (error) {
     console.error('Voice error:', error);
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+// ============================================================================
+// SELECTIVE REGENERATION - Regenerate specific days with custom theme
+// ============================================================================
+
+interface SelectiveRegenRequest {
+  selectedDays: number[];           // Which days to regenerate
+  themePrompt: string;              // Custom theme/prompt to apply
+  existingPlan: Array<{             // Current plan for context
+    day: number;
+    imageIds: string[];
+    seed: string;
+    caption?: string;
+  }>;
+  imageAnalyses: Array<{            // Image data for selected days
+    id: string;
+    content: string;
+    mood: string;
+  }>;
+  phase: string;
+  history?: string;                 // Previously posted content for context
+}
+
+app.post('/api/regenerate-selected', async (req, res) => {
+  try {
+    const { selectedDays, themePrompt, existingPlan, imageAnalyses, phase, history } = req.body as SelectiveRegenRequest;
+    
+    if (!selectedDays?.length || !themePrompt) {
+      return res.status(400).json({ error: 'selectedDays and themePrompt required' });
+    }
+
+    // Get the days we're regenerating
+    const daysToRegen = existingPlan.filter(p => selectedDays.includes(p.day));
+    const otherDays = existingPlan.filter(p => !selectedDays.includes(p.day));
+
+    // Get relevant image analyses for selected days
+    const relevantImageIds = new Set(daysToRegen.flatMap(d => d.imageIds));
+    const relevantAnalyses = imageAnalyses.filter(a => relevantImageIds.has(a.id));
+
+    const prompt = `Du skal REGENERERE indhold for specifikke dage med et NYT TEMA.
+
+TEMA/PROMPT FRA BRUGER:
+"${themePrompt}"
+
+DAGE DER SKAL REGENERERES: ${selectedDays.join(', ')}
+
+BILLEDER TIL RÅDIGHED FOR DISSE DAGE:
+${relevantAnalyses.map(a => `- ID: ${a.id}\n  Indhold: ${a.content}\n  Stemning: ${a.mood}`).join('\n')}
+
+EKSISTERENDE PLAN (for kontekst - disse dage ændres IKKE):
+${otherDays.map(d => `Dag ${d.day}: ${d.seed}`).join('\n')}
+
+${history ? `TIDLIGERE POSTET INDHOLD (undgå gentagelser):\n${history}` : ''}
+
+FASE: ${phase}
+
+KRAV:
+1. Generer NYE seeds for dag ${selectedDays.join(', ')} baseret på temaet "${themePrompt}"
+2. Behold de samme billeder (imageIds) for hver dag
+3. Sørg for at temaet føles naturligt, ikke påklistret
+4. Varier hooks og CTAs
+5. Output PRÆCIS ${selectedDays.length} dage`;
+
+    const result = await runClaude({
+      prompt,
+      systemPrompt: brainSystemPrompt,
+      jsonSchema: {
+        type: 'object',
+        properties: {
+          thoughts: { type: 'string' },
+          plan: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                day: { type: 'number' },
+                imageIds: { type: 'array', items: { type: 'string' } },
+                seed: { type: 'string' },
+                reasoning: { type: 'string' },
+                time: { type: 'string' },
+                hookType: { type: 'string' },
+                ctaType: { type: 'string' },
+              },
+              required: ['day', 'imageIds', 'seed', 'time'],
+            },
+          },
+        },
+        required: ['thoughts', 'plan'],
+      },
+      model: 'sonnet',
+      timeoutMs: 120000,
+    });
+
+    if (!result.success) {
+      return res.status(500).json({ error: result.error });
+    }
+
+    return res.json({
+      success: true,
+      regeneratedPlan: result.structuredOutput,
+      usage: result.usage,
+    });
+  } catch (error) {
+    console.error('Selective regen error:', error);
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+// ============================================================================
+// VOICE WITH THEME - Write caption with specific theme overlay
+// ============================================================================
+
+interface VoiceWithThemeRequest extends VoiceRequest {
+  themeOverlay?: string;  // Optional theme to apply
+}
+
+app.post('/api/voice-themed', async (req, res) => {
+  try {
+    const { seed, imageContext, previousPost, phase, hookType, ctaType, dayNumber, themeOverlay } = req.body as VoiceWithThemeRequest;
+    
+    if (!seed) {
+      return res.status(400).json({ error: 'seed required' });
+    }
+
+    const hookHints: Record<string, string> = {
+      EMOTIONAL: 'Start med minder, dufte, følelser. Skab forbindelse.',
+      CONTROVERSIAL: 'Start med en skarp holdning til mad/vin. Vær modig.',
+      HUMOROUS: 'Start med selvironi eller kaos. Vis menneskelig side.',
+      INFORMATIVE: 'Start med nørdet viden. Del noget folk ikke vidste.',
+      DIRECT: 'Start uden indpakning. Bare fakta, ingen pynt.',
+    };
+    
+    const ctaHints: Record<string, string> = {
+      NONE: 'Slut med punktum. Ingen opfordring.',
+      HIDDEN: 'Nævn muligheden i en bisætning. Subtilt.',
+      SOFT: 'Afslut med "Kig forbi...", "Kom og sig hej".',
+      VALUE: 'Giv en opskrift, et tip, eller noget værdifuldt.',
+      SELL: 'Direkte booking-opfordring. Brug sjældent!',
+    };
+
+    const themeSection = themeOverlay 
+      ? `\nTEMA-OVERLAY (væv dette naturligt ind):\n"${themeOverlay}"\n`
+      : '';
+
+    const prompt = `Skriv et Facebook/Instagram opslag på dansk for Dag ${dayNumber || '?'}.
+
+SEED (ide/tema): ${seed}
+${themeSection}
+BILLEDE-STEMNING (brug som inspiration, IKKE som emne): ${imageContext}
+
+FASE: ${phase}
+${hookType ? `HOOK TIP: ${hookHints[hookType] || hookType}` : ''}
+${ctaType ? `CTA TIP: ${ctaHints[ctaType] || ctaType}` : ''}
+
+${previousPost ? `FORRIGE OPSLAG (undgå gentagelser):\n---\n${previousPost}\n---` : 'Dette er første opslag.'}
+
+KRAV:
+- Output KUN selve opslaget - ingen forklaringer eller noter
+- Plain text med linjeskift mellem afsnit
+- 6-12 sætninger med substans
+- 0-4 emojis naturligt placeret
+- "sgu" maks 1 gang per 5-10 opslag
+- Brug ALDRIG forbudte ord
+- BESKRIV ALDRIG billedet direkte - fortæl en historie i stedet
+${themeOverlay ? `- Væv temaet "${themeOverlay}" naturligt ind` : ''}
+
+Skriv opslaget nu:`;
+
+    const result = await runClaude({
+      prompt,
+      systemPrompt: voiceSystemPrompt,
+      model: 'sonnet',
+      timeoutMs: 90000,
+    });
+
+    if (!result.success) {
+      return res.status(500).json({ error: result.error });
+    }
+
+    let caption = result.result || '';
+    
+    if (caption.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(caption);
+        caption = parsed.caption || parsed.text || parsed.result || caption;
+      } catch {
+        // Keep original
+      }
+    }
+
+    caption = caption
+      .replace(/^(Her er|Here'?s?|Caption|Opslag|Post)[:\s]*/i, '')
+      .replace(/^["']|["']$/g, '')
+      .trim();
+
+    return res.json({
+      success: true,
+      caption,
+      usage: result.usage,
+    });
+  } catch (error) {
+    console.error('Voice themed error:', error);
     return res.status(500).json({ error: String(error) });
   }
 });

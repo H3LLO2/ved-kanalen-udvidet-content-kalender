@@ -21,7 +21,8 @@ export async function createContentPlan(
   phase: Phase,
   targetDays: number,
   segment?: EstablishmentSegment,
-  history: string = ''
+  history: string = '',
+  startFromDay: number = 1
 ): Promise<BrainResult> {
   try {
     const response = await fetch(`${API_BASE}/api/brain`, {
@@ -38,6 +39,7 @@ export async function createContentPlan(
         targetDays,
         segment,
         previousHistory: history,
+        startFromDay, // Day number to start from (for accumulative planning)
         // Include brand context for better planning
         brandContext: {
           manifest: buildManifest(),

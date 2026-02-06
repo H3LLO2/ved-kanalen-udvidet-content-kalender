@@ -113,6 +113,7 @@ interface BrainRequest {
   targetDays: number;
   segment?: number;
   previousHistory?: string;
+  startFromDay?: number; // Day number to start from (for accumulative planning)
   brandContext?: {
     manifest: string;
     strategy: string;
@@ -165,7 +166,7 @@ Previous phases:
 
 app.post('/api/brain', async (req, res) => {
   try {
-    const { imageAnalyses, phase, targetDays, previousHistory, brandContext } = req.body as BrainRequest;
+    const { imageAnalyses, phase, targetDays, previousHistory, startFromDay, brandContext } = req.body as BrainRequest;
     
     if (!imageAnalyses?.length) {
       return res.status(400).json({ error: 'imageAnalyses required' });
@@ -188,9 +189,13 @@ ${brandContext.postingTimes}
 `;
     }
 
+    const startDay = startFromDay || 1;
+    const endDay = startDay + targetDays - 1;
+
     const prompt = `${contextSection}
 
 Create a ${targetDays}-day content plan for phase "${phase}".
+${startDay > 1 ? `\n⚠️ IMPORTANT: This is a CONTINUATION of an existing plan. Start day numbers from ${startDay} (days ${startDay}-${endDay}).\n` : ''}
 
 Available images (${imageAnalyses.length} total):
 ${imageAnalyses.map((a) => `- ID: ${a.id}\n  Content: ${a.content}\n  Mood: ${a.mood}\n  Strategic Fit: ${a.strategicFit}`).join('\n\n')}
@@ -206,8 +211,9 @@ CRITICAL REQUIREMENTS:
 6. Vary CTA types based on phase: NONE, HIDDEN, SOFT, VALUE, SELL
 7. Detect and handle duplicate/similar images intelligently
 8. Request graphics only when genuinely needed for variety
+${startDay > 1 ? `9. Number days from ${startDay} to ${endDay} (NOT 1 to ${targetDays})` : ''}
 
-Return EXACTLY ${targetDays} days of content.`;
+Return EXACTLY ${targetDays} days of content${startDay > 1 ? `, numbered ${startDay}-${endDay}` : ''}.`;
 
     const result = await runClaude({
       prompt,

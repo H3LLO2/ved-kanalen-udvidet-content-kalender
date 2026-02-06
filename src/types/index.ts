@@ -80,6 +80,8 @@ export interface Post {
   status: PostStatus;
   imageIds: string[];
   generatedGraphicPath?: string;
+  scheduledFor?: Date;   // When scheduled to post via Meta API
+  metaPostId?: string;   // ID from Meta after scheduling
   createdAt: Date;
   updatedAt: Date;
 }

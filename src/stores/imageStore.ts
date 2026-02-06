@@ -25,6 +25,7 @@ interface ImageState {
   images: DisplayImage[];
   selectedIds: Set<string>;
   externallyUsedIds: Set<string>; // Images already used in manually posted content
+  postedToMetaIds: Set<string>; // Images confirmed posted to FB/IG
   isLoading: boolean;
   uploadProgress: { current: number; total: number } | null;
   error: string | null;
@@ -45,12 +46,17 @@ interface ImageState {
   toggleExternallyUsed: (id: string) => void;
   markSelectedAsExternallyUsed: () => void;
   clearExternallyUsed: () => void;
+  
+  // Posted to Meta tracking
+  markAsPostedToMeta: (ids: string[]) => void;
+  clearPostedToMeta: () => void;
 }
 
 export const useImageStore = create<ImageState>((set, get) => ({
   images: [],
   selectedIds: new Set(),
   externallyUsedIds: new Set(),
+  postedToMetaIds: new Set(),
   isLoading: false,
   uploadProgress: null,
   error: null,
@@ -241,5 +247,17 @@ export const useImageStore = create<ImageState>((set, get) => ({
   // Clear all externally used markings
   clearExternallyUsed: () => {
     set({ externallyUsedIds: new Set() });
+  },
+
+  // Mark images as posted to Meta (FB/IG)
+  markAsPostedToMeta: (ids: string[]) => {
+    set((state) => ({
+      postedToMetaIds: new Set([...state.postedToMetaIds, ...ids]),
+    }));
+  },
+
+  // Clear posted to Meta markings
+  clearPostedToMeta: () => {
+    set({ postedToMetaIds: new Set() });
   },
 }));

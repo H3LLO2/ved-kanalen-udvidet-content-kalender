@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { PostCard } from './PostCard';
 import type { Post } from '../../types';
 import type { DisplayImage } from '../../stores';
+import type { GraphicItem } from '../../stores/graphicsStore';
 import { Calendar, Download, RefreshCw, Sparkles, Check, Square, CheckSquare } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3002';
@@ -10,20 +11,26 @@ interface PostListProps {
   posts: Post[];
   images: DisplayImage[];
   onCaptionChange?: (id: string, newCaption: string) => void;
+  onImagesChange?: (postId: string, imageIds: string[], newGraphics?: GraphicItem[]) => void;
+  onSchedule?: (postId: string, scheduledTime: Date, platforms: { fb: boolean; ig: boolean }) => Promise<{ success: boolean; error?: string }>;
   onPostsRegenerated?: (regeneratedPosts: Post[]) => void;
   imageAnalyses?: Array<{ id: string; content: string; mood: string; strategicFit: string }>;
   phase?: string;
   history?: string;
+  startDate?: Date;
 }
 
 export function PostList({ 
   posts, 
   images, 
   onCaptionChange,
+  onImagesChange,
+  onSchedule,
   onPostsRegenerated,
   imageAnalyses = [],
   phase = 'ESTABLISHMENT',
   history = '',
+  startDate,
 }: PostListProps) {
   const [selectedDays, setSelectedDays] = useState<Set<number>>(new Set());
   const [themePrompt, setThemePrompt] = useState('');
@@ -332,6 +339,9 @@ export function PostList({
                 post={post}
                 images={images}
                 onCaptionChange={onCaptionChange}
+                onImagesChange={onImagesChange}
+                onSchedule={onSchedule}
+                startDate={startDate}
               />
             </div>
           </div>

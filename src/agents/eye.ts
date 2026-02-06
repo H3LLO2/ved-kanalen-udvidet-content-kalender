@@ -1,17 +1,13 @@
-import { getFlashModel, extractJson, withRateLimit, trackTokens } from '../lib/gemini';
+/**
+ * The Eye - Vision Analysis Agent
+ * Now uses Claude Code via backend API instead of Gemini
+ */
+
 import { blobToBase64 } from '../lib/heic';
 import type { EyeOutput } from '../types';
 import pLimit from 'p-limit';
 
-// Simple, focused prompt that works well
-const EYE_PROMPT = `Analyze this image for a social media content orchestrator.
-Output ONLY valid JSON.
-Structure:
-{
-  "content": "Detailed visual description...",
-  "mood": "The emotional vibe (e.g. Chaotic, Authentic, Premium)...",
-  "strategicFit": "How this fits a rebranding strategy (e.g. Physical Transformation, Team, Food Lab)..."
-}`;
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3002';
 
 interface EyeResult {
   success: boolean;
@@ -21,41 +17,42 @@ interface EyeResult {
 
 export async function analyzeImage(imageId: string, blob: Blob): Promise<EyeResult> {
   try {
-    const model = getFlashModel();
     const base64 = await blobToBase64(blob);
-
+    
     // Remove the data URL prefix to get raw base64
     const base64Parts = base64.split(',');
     const base64Data = base64Parts[1] || base64Parts[0] || '';
     const mimeType = blob.type || 'image/jpeg';
 
-    const result = await withRateLimit(async () => {
-      return await model.generateContent([
-        EYE_PROMPT,
-        {
-          inlineData: {
-            data: base64Data,
-            mimeType,
-          },
-        },
-      ]);
+    const response = await fetch(`${API_BASE}/api/eye`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        imageBase64: base64Data,
+        mimeType,
+      }),
     });
 
-    // Track token usage
-    trackTokens('eye', result);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `HTTP ${response.status}`);
+    }
 
-    const response = result.response;
-    const text = response.text();
+    const data = await response.json();
 
-    const parsed = extractJson<{ content: string; mood: string; strategicFit: string }>(text);
+    if (!data.success) {
+      throw new Error(data.error || 'Analysis failed');
+    }
+
+    const analysis = data.analysis;
 
     return {
       success: true,
       output: {
         id: imageId,
-        content: parsed.content,
-        mood: parsed.mood,
-        strategicFit: parsed.strategicFit,
+        content: analysis.content || 'No content description',
+        mood: analysis.mood || 'Unknown',
+        strategicFit: analysis.strategicFit || 'Needs review',
       },
     };
   } catch (error) {
@@ -79,8 +76,8 @@ export async function analyzeAllImages(
   const analyses: EyeOutput[] = [];
   const failed: { id: string; error: string }[] = [];
 
-  // Limit concurrent requests
-  const limit = pLimit(3);
+  // Limit concurrent requests (Claude Code is slower, use lower concurrency)
+  const limit = pLimit(2);
   let completed = 0;
 
   const promises = images.map((img) =>

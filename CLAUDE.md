@@ -9,13 +9,12 @@ Autonomous AI-powered social media content orchestrator for "Ved Kanalen", a Dan
 ## Tech Stack
 
 - **Frontend:** React 18+ with TypeScript, Vite, Tailwind CSS
-- **Backend:** Local only (no Supabase)
-- **Persistence:** IndexedDB or local file storage (TBD)
-- **AI Provider:** Google Gemini API
-  - `gemini-3-flash-preview` - Vision analysis (The Eye)
-  - `gemini-3-pro-preview` - Planning and writing (The Brain, The Voice)
-  - `gemini-3-pro-image-preview` - Graphic generation (The Designer)
-- **State:** React hooks + Context (or Zustand if complex)
+- **Backend:** Express server (Node.js) - spawns Claude Code for AI tasks
+- **Persistence:** IndexedDB (browser-side)
+- **AI Provider:** HYBRID
+  - **Claude Code (local)** - The Eye, The Brain, The Voice (saves API costs)
+  - **Gemini API** - The Designer only (image generation)
+- **State:** Zustand
 - **Icons:** Lucide React
 
 ## Project Structure
@@ -23,17 +22,18 @@ Autonomous AI-powered social media content orchestrator for "Ved Kanalen", a Dan
 ```
 ved-kanalen-content-calendar/
 ├── src/
-│   ├── agents/           # AI agent implementations
-│   │   ├── eye.ts        # Vision analysis agent
-│   │   ├── brain.ts      # Strategic planner agent
-│   │   ├── voice.ts      # Copywriting agent
-│   │   └── designer.ts   # Graphic generation agent
+│   ├── agents/           # AI agent implementations (call backend API)
+│   │   ├── eye.ts        # Vision analysis → Claude Code
+│   │   ├── brain.ts      # Strategic planner → Claude Code
+│   │   ├── voice.ts      # Copywriting → Claude Code
+│   │   └── designer.ts   # Graphic generation → Gemini API
 │   ├── components/       # React components
 │   ├── lib/              # Utilities and helpers
-│   ├── types/            # TypeScript type definitions
-│   └── hooks/            # Custom React hooks
-├── supabase/
-│   └── functions/        # Edge Functions for AI calls
+│   ├── stores/           # Zustand state management
+│   └── types/            # TypeScript type definitions
+├── server/               # Backend server (Express)
+│   ├── index.ts          # Main server with API routes
+│   └── claude-runner.ts  # Claude Code spawner utility
 ├── docs/
 │   └── handover/         # Original knowledge documents
 └── public/
@@ -60,10 +60,22 @@ ved-kanalen-content-calendar/
 
 Four agents work in sequence:
 
-1. **The Eye (Vision)** - Analyzes each image for content, mood, strategic fit
-2. **The Brain (Planner)** - Creates content calendar, groups images, plans narrative arc
-3. **The Voice (Writer)** - Writes authentic Danish captions following strict voice rules
-4. **The Designer (Graphics)** - Generates Canva-style infographics when needed
+1. **The Eye (Vision)** - Analyzes each image for content, mood, strategic fit → **Claude Code**
+2. **The Brain (Planner)** - Creates content calendar, groups images, plans narrative arc → **Claude Code**
+3. **The Voice (Writer)** - Writes authentic Danish captions following strict voice rules → **Claude Code**
+4. **The Designer (Graphics)** - Generates Canva-style infographics when needed → **Gemini API**
+
+```
+Frontend (React)
+     │
+     ▼
+Backend Server (Express, port 3002)
+     │
+     ├── POST /api/eye ──────→ spawns: claude -p (vision)
+     ├── POST /api/brain ────→ spawns: claude -p (planning)
+     ├── POST /api/voice ────→ spawns: claude -p (writing)
+     └── POST /api/designer ─→ Gemini API (image gen)
+```
 
 See `docs/handover/06_AI_AGENTS.md` for detailed specifications.
 
@@ -108,20 +120,39 @@ See `docs/handover/07_SYSTEM_PROMPT.md` for the full ghostwriter prompt.
 ## Commands
 
 ```bash
-# Development
-npm run dev          # Start Vite dev server
-npm run build        # Build for production
+# Development (runs both frontend + backend)
+npm run dev          # Start Vite + Express server (concurrently)
+
+# Individual processes
+npm run dev:client   # Start Vite dev server only (port 5173)
+npm run dev:server   # Start Express server only (port 3002)
+npm run server       # Run server without watch mode
+
+# Build
+npm run build        # Build frontend for production
 npm run lint         # Run ESLint
 ```
 
 ## Environment Variables
 
 Required in `.env.local`:
-```
+```bash
+# Backend API URL (frontend calls this)
+VITE_API_URL=http://localhost:3002
+
+# Gemini API key (ONLY for The Designer - image generation)
+# Eye, Brain, and Voice now use Claude Code locally (no API key needed)
 VITE_GEMINI_API_KEY=your-gemini-api-key
+GEMINI_API_KEY=your-gemini-api-key
+
+# Server port (optional, default 3002)
+PORT=3002
 ```
 
-**Note:** Since this runs locally, the API key is in the frontend. For production deployment, consider a proxy server.
+**Architecture Note:** The backend server spawns Claude Code CLI for text/vision tasks. This means:
+- No Anthropic API costs for Eye, Brain, Voice
+- Claude Code must be installed and authenticated (`claude auth login`)
+- Gemini API is ONLY used for image generation (The Designer)
 
 ## Testing
 

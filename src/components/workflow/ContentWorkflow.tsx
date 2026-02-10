@@ -13,23 +13,27 @@ import { FlexibleGraphicsGenerator } from '../menu/FlexibleGraphicsGenerator';
 import { useImageStore, useCampaignStore, useGenerationStore } from '../../stores';
 import { analyzeAllImages } from '../../agents/eye';
 import { createContentPlan } from '../../agents/brain';
-import { writeAllCaptions } from '../../agents/voice';
+import { writeAllCaptions, autoFixCaptions, rewriteWithFeedback } from '../../agents/voice';
+import { getAnalysisByImage } from '../../lib/database';
 import {
-  processGraphicRequests,
-  suggestGraphicForPost,
-  generateGraphicsForPosts,
-  type GraphicSuggestion,
+  generateGraphic,
 } from '../../agents/designer';
 import { generateAllHashtags } from '../../lib/hashtags';
 import { getImage, generateId, createImageUrl } from '../../lib/database';
+import { formatDateDanish } from '../../lib/calendar';
+import { blobToBase64 } from '../../lib/heic';
 import type { Post, Phase, EstablishmentSegment } from '../../types';
 
-// Generated graphic with blob URL
-interface GeneratedGraphic {
-  postId: string;
+// Brain's suggestion for a graphic (not yet generated)
+interface GraphicSuggestionItem {
   dayNumber: number;
-  blobUrl: string;
-  description: string;
+  concept: string;
+  headline?: string;
+  subtext?: string;
+  style: string;
+  reason: string;
+  status: 'pending' | 'generating' | 'done';
+  blobUrl?: string;
 }
 
 type WorkflowStep = 'upload' | 'review' | 'generate' | 'output';
@@ -58,7 +62,7 @@ export function ContentWorkflow({ campaignId }: ContentWorkflowProps) {
   const [selectedBatch, setSelectedBatch] = useState<1 | 2 | 3>(1);
   const [historyContent, setHistoryContent] = useState(''); // Previously posted content for context
   const [clientNotes, setClientNotes] = useState(''); // Ongoing notes from client
-  const [metaToken, setMetaToken] = useState(''); // Meta API token
+  const [metaToken, setMetaToken] = useState(import.meta.env.VITE_META_ACCESS_TOKEN || ''); // Meta API token
   const [isFetchingMeta, setIsFetchingMeta] = useState(false);
   
   // Flexible plan settings
@@ -68,11 +72,11 @@ export function ContentWorkflow({ campaignId }: ContentWorkflowProps) {
   const [isSyncingWithFacebook, setIsSyncingWithFacebook] = useState(false);
 
   // Graphics generation state
-  const [generatedGraphics, setGeneratedGraphics] = useState<GeneratedGraphic[]>([]);
-  const [isGeneratingGraphics, setIsGeneratingGraphics] = useState(false);
-  const [graphicsProgress, setGraphicsProgress] = useState({ current: 0, total: 0 });
 
-  const { images, loadImages, selectedIds } = useImageStore();
+  // Brain's graphic suggestions queue
+  const [graphicSuggestions, setGraphicSuggestions] = useState<GraphicSuggestionItem[]>([]);
+
+  const { images, loadImages, selectedIds, markAsPostedToMeta } = useImageStore();
   const { currentCampaign, updateCampaign } = useCampaignStore();
   const {
     stage,
@@ -131,27 +135,86 @@ export function ContentWorkflow({ campaignId }: ContentWorkflowProps) {
       const runNumber = await startNewRun(campaignId);
       const runId = useGenerationStore.getState().currentRunId!;
 
-      // Step 1: Analyze images with The Eye
-      setStage('analyzing', 'Analyserer billeder...');
+      // Step 1: Analyze images with The Eye (skip already-analyzed images)
+      setStage('analyzing', 'Tjekker eksisterende analyser...');
 
-      const imagesToAnalyze = selectedIds.size > 0
+      const imagesToProcess = selectedIds.size > 0
         ? images.filter((img) => selectedIds.has(img.id))
         : images;
 
-      const imageBlobs = await Promise.all(
-        imagesToAnalyze.map(async (img) => {
-          const stored = await getImage(img.id);
-          return { id: img.id, blob: stored?.blob || new Blob() };
-        })
-      );
+      // Check which images already have analyses in the DB
+      const existingAnalyses: import('../../types').EyeOutput[] = [];
+      const needsAnalysis: typeof imagesToProcess = [];
 
-      const { analyses: newAnalyses } = await analyzeAllImages(imageBlobs, (current, total) => {
-        setProgress(current, total, `Analyserer billede ${current} af ${total}...`);
-      });
+      for (const img of imagesToProcess) {
+        const existing = await getAnalysisByImage(img.id);
+        // Only reuse analysis if it's valid (not a failure placeholder)
+        const isValid = existing &&
+          existing.content &&
+          !existing.content.toLowerCase().includes('failed') &&
+          !existing.content.toLowerCase().includes('manual description') &&
+          existing.content.length > 20;
+        if (isValid) {
+          existingAnalyses.push({
+            id: existing.imageId,
+            content: existing.content,
+            mood: existing.mood,
+            strategicFit: existing.strategicFit,
+          });
+        } else {
+          needsAnalysis.push(img);
+        }
+      }
 
-      // Save analyses
-      for (const analysis of newAnalyses) {
-        await addAnalysis(analysis);
+      let newAnalyses = [...existingAnalyses];
+
+      if (needsAnalysis.length > 0) {
+        setStage('analyzing', `Analyserer ${needsAnalysis.length} nye billeder (${existingAnalyses.length} allerede analyseret)...`);
+
+        const imageBlobs = await Promise.all(
+          needsAnalysis.map(async (img) => {
+            const stored = await getImage(img.id);
+            return { id: img.id, blob: stored?.blob || new Blob() };
+          })
+        );
+
+        const { analyses: freshAnalyses } = await analyzeAllImages(imageBlobs, (current, total) => {
+          setProgress(current, total, `Analyserer billede ${current} af ${total} (${existingAnalyses.length} genbrugt)...`);
+        });
+
+        // Save new analyses
+        for (const analysis of freshAnalyses) {
+          await addAnalysis(analysis);
+        }
+
+        newAnalyses = [...existingAnalyses, ...freshAnalyses];
+      } else {
+        setStage('analyzing', `Alle ${existingAnalyses.length} billeder allerede analyseret — springer over!`);
+        // Brief pause so user can see the message
+        await new Promise(r => setTimeout(r, 1500));
+      }
+
+      // Step 1.5: Fetch engagement insights from Meta (if token available)
+      setStage('planning', 'Henter engagement data fra Meta...');
+      let engagementInsights: string | undefined;
+      let styleReference: string | undefined;
+
+      if (metaToken) {
+        try {
+          const insightsRes = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:3002'}/api/meta/engagement-insights`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ accessToken: metaToken }),
+          });
+          const insightsData = await insightsRes.json();
+          if (insightsData.success) {
+            engagementInsights = insightsData.insights;
+            styleReference = insightsData.styleReference;
+            console.log(`Loaded engagement insights from ${insightsData.postCount} posts`);
+          }
+        } catch (e) {
+          console.warn('Could not fetch engagement insights:', e);
+        }
       }
 
       // Step 2: Create content plan with The Brain
@@ -159,14 +222,14 @@ export function ContentWorkflow({ campaignId }: ContentWorkflowProps) {
 
       // Get the highest existing day number to continue from
       const existingPosts = useGenerationStore.getState().posts;
-      const highestExistingDay = existingPosts.length > 0 
+      const highestExistingDay = existingPosts.length > 0
         ? Math.max(...existingPosts.map(p => p.dayNumber))
         : 0;
-      
+
       // Use flexible plan days instead of batch system
       const targetDays = planDays;
       const startFromDay = highestExistingDay + 1;
-      
+
       const { phase, segment } = getPhaseForBatch(selectedBatch);
 
       const planResult = await createContentPlan(
@@ -175,7 +238,10 @@ export function ContentWorkflow({ campaignId }: ContentWorkflowProps) {
         targetDays,
         segment,
         historyContent, // Previously posted content for context
-        startFromDay // Start numbering from this day
+        startFromDay, // Start numbering from this day
+        engagementInsights, // Engagement patterns from Meta
+        undefined, // reviewFeedback (none on first pass)
+        clientNotes || undefined, // Owner's notes/directions
       );
 
       if (!planResult.success || !planResult.output) {
@@ -184,24 +250,34 @@ export function ContentWorkflow({ campaignId }: ContentWorkflowProps) {
 
       await setBrainPlan(planResult.output, campaignId);
 
-      // Step 3: Generate graphics with The Designer (if any requested)
-      const graphicRequests = planResult.output.plan
-        .filter((p) => p.graphic?.shouldGenerate)
-        .map((p) => ({ dayNumber: p.day, request: p.graphic! }));
+      // Store graphic suggestions from Brain (user will review & generate later)
+      const brainGraphicSuggestions: GraphicSuggestionItem[] = planResult.output.plan
+        .filter((p: any) => p.graphicSuggestion)
+        .map((p: any) => ({
+          dayNumber: p.day,
+          concept: p.graphicSuggestion.concept,
+          headline: p.graphicSuggestion.headline,
+          subtext: p.graphicSuggestion.subtext,
+          style: p.graphicSuggestion.style,
+          reason: p.graphicSuggestion.reason,
+          status: 'pending' as const,
+        }));
+      setGraphicSuggestions(brainGraphicSuggestions);
 
-      if (graphicRequests.length > 0) {
-        setStage('generating-graphics', 'Genererer grafik...');
-        await processGraphicRequests(graphicRequests, (current, total) => {
-          setProgress(current, total, `Genererer grafik ${current} af ${total}...`);
-        });
-      }
-
-      // Step 4: Write captions with The Voice
+      // Step 3: Write captions with The Voice
       setStage('writing', 'Skriver tekster...');
 
-      const captionInputs = planResult.output.plan.map((p) => {
+      const captionInputs = planResult.output.plan.map((p, index) => {
         const imageAnalyses = newAnalyses.filter((a) => p.imageIds.includes(a.id));
         const imageContext = imageAnalyses.map((a) => a.content).join('\n');
+
+        // Calculate actual date for this day
+        let actualDate: string | undefined;
+        if (planStartDate) {
+          const date = new Date(planStartDate);
+          date.setDate(date.getDate() + index);
+          actualDate = formatDateDanish(date);
+        }
 
         return {
           dayNumber: p.day,
@@ -209,6 +285,7 @@ export function ContentWorkflow({ campaignId }: ContentWorkflowProps) {
           imageContext,
           hookType: p.hookType,
           ctaType: p.ctaType,
+          actualDate,
         };
       });
 
@@ -217,15 +294,139 @@ export function ContentWorkflow({ campaignId }: ContentWorkflowProps) {
         phase,
         (current, total) => {
           setProgress(current, total, `Skriver tekst ${current} af ${total}...`);
-        }
+        },
+        styleReference, // Recent post style for tone continuity
       );
 
+      // Step 4: Review → Rewrite → Re-plan feedback loop
+      // Round 1: Review → if low, rewrite Voice
+      // Round 2: Review → if still low, re-plan Brain → rewrite all Voice
+      // Round 3: Final review (just score, no more rewrites)
+      setStage('reviewing', 'Kører kvalitetskontrol...');
+
+      let fixedCaptions = autoFixCaptions(captions);
+      let currentPlanResult = planResult;
+      let currentCaptionInputs = captionInputs;
+      const QUALITY_THRESHOLD = 80;
+
+      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3002';
+
+      // Helper: run AI review
+      const runReview = async (caps: Map<number, string>) => {
+        const res = await fetch(`${apiUrl}/api/review`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            captions: [...caps.entries()].map(([day, caption]) => ({ dayNumber: day, caption })),
+            phase,
+          }),
+        });
+        const data = await res.json();
+        if (!data.success || !data.review) return null;
+        return data.review as {
+          overallScore: number;
+          issues: Array<{ day: number; severity: string; type: string; message: string }>;
+          summary: string;
+        };
+      };
+
+      try {
+        // === ROUND 1: Initial review ===
+        setProgress(1, 4, 'AI kvalitetskontrol (runde 1)...');
+        const review1 = await runReview(fixedCaptions);
+
+        if (review1 && review1.overallScore < QUALITY_THRESHOLD) {
+          console.log(`Review 1: ${review1.overallScore}/100 — attempting Voice rewrites`);
+          const seriousIssues = review1.issues.filter((i) => i.severity === 'high' || i.severity === 'medium');
+
+          if (seriousIssues.length > 0) {
+            // === ROUND 1b: Rewrite flagged Voice days ===
+            setProgress(2, 4, `Omskriver ${new Set(seriousIssues.map((i) => i.day)).size} opslag...`);
+            const rewriteResult = await rewriteWithFeedback(
+              fixedCaptions, review1.issues, review1.summary,
+              currentCaptionInputs, phase,
+              (c, t) => setProgress(2, 4, `Omskriver opslag ${c}/${t}...`),
+              styleReference,
+            );
+            fixedCaptions = rewriteResult.captions;
+            console.log(`Rewrote ${rewriteResult.rewrittenDays.length} days`);
+
+            // === ROUND 2: Review after Voice rewrites ===
+            setProgress(2, 4, 'AI kvalitetskontrol (runde 2)...');
+            const review2 = await runReview(fixedCaptions);
+
+            if (review2 && review2.overallScore < QUALITY_THRESHOLD) {
+              console.log(`Review 2: ${review2.overallScore}/100 — Brain re-plan needed`);
+
+              // === ROUND 2b: Brain re-plan with review feedback ===
+              setStage('planning', 'Brain laver ny plan baseret på feedback...');
+              setProgress(3, 4, 'Brain laver ny plan...');
+
+              const replanResult = await createContentPlan(
+                newAnalyses, phase, targetDays, segment,
+                historyContent, startFromDay, engagementInsights,
+                `SCORE: ${review2.overallScore}/100\n${review2.summary}\n\nPROBLEMER:\n${review2.issues.map((i) => `- Dag ${i.day} [${i.severity}/${i.type}]: ${i.message}`).join('\n')}`,
+                clientNotes || undefined,
+              );
+
+              if (replanResult.success && replanResult.output) {
+                currentPlanResult = replanResult;
+                await setBrainPlan(replanResult.output, campaignId);
+
+                // Rebuild caption inputs from new plan
+                currentCaptionInputs = replanResult.output.plan.map((p, idx) => {
+                  const imgAnalyses = newAnalyses.filter((a) => p.imageIds.includes(a.id));
+                  const imgCtx = imgAnalyses.map((a) => a.content).join('\n');
+                  let ad: string | undefined;
+                  if (planStartDate) {
+                    const d = new Date(planStartDate);
+                    d.setDate(d.getDate() + idx);
+                    ad = formatDateDanish(d);
+                  }
+                  return { dayNumber: p.day, seed: p.seed, imageContext: imgCtx, hookType: p.hookType, ctaType: p.ctaType, actualDate: ad };
+                });
+
+                // === ROUND 2c: Voice all days with new plan ===
+                setStage('writing', 'Skriver nye tekster...');
+                const { captions: newCaps } = await writeAllCaptions(
+                  currentCaptionInputs, phase,
+                  (c, t) => setProgress(3, 4, `Skriver tekst ${c} af ${t}...`),
+                  styleReference,
+                );
+                fixedCaptions = autoFixCaptions(newCaps);
+
+                // === ROUND 3: Final review ===
+                setStage('reviewing', 'Final kvalitetskontrol...');
+                setProgress(4, 4, 'AI kvalitetskontrol (final)...');
+                const review3 = await runReview(fixedCaptions);
+                if (review3) {
+                  console.log(`Review 3 (final): ${review3.overallScore}/100 - ${review3.summary}`);
+                  setProgress(4, 4, `Kvalitetsscore: ${review3.overallScore}/100 - ${review3.summary}`);
+                  await new Promise((r) => setTimeout(r, 3000));
+                }
+              }
+            } else if (review2) {
+              console.log(`Review 2: ${review2.overallScore}/100 — good enough after rewrites`);
+              setProgress(4, 4, `Kvalitetsscore: ${review2.overallScore}/100 - ${review2.summary}`);
+              await new Promise((r) => setTimeout(r, 3000));
+            }
+          }
+        } else if (review1) {
+          console.log(`Review 1: ${review1.overallScore}/100 — passed on first try!`);
+          setProgress(4, 4, `Kvalitetsscore: ${review1.overallScore}/100 - ${review1.summary}`);
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+      } catch (e) {
+        console.warn('Review loop failed (non-critical):', e);
+      }
+
       // Create posts with adjusted day numbers (continuing from existing)
-      const newPosts: Post[] = planResult.output.plan.map((p, index) => ({
+      const finalPlan = currentPlanResult.output!.plan;
+      const newPosts: Post[] = finalPlan.map((p, index) => ({
         id: generateId(),
         campaignId,
         dayNumber: startFromDay + index, // Continue numbering from existing posts
-        caption: captions.get(p.day) || '',
+        caption: fixedCaptions.get(p.day) || '',
         postingTime: p.time,
         seed: p.seed,
         reasoning: p.reasoning,
@@ -255,6 +456,9 @@ export function ContentWorkflow({ campaignId }: ContentWorkflowProps) {
     selectedIds,
     selectedBatch,
     planDays,
+    planStartDate,
+    metaToken,
+    historyContent,
     setStage,
     setProgress,
     setError,
@@ -389,27 +593,68 @@ export function ContentWorkflow({ campaignId }: ContentWorkflowProps) {
     return new Date(planStartDate);
   }, [planStartDate]);
 
-  // Sync with Facebook to find already posted images
+  // Sync with Facebook to find already posted images via perceptual hashing
   const handleSyncWithFacebook = useCallback(async () => {
     setIsSyncingWithFacebook(true);
     try {
-      const result = await fetchPostedImages(200);
-      if (result.success) {
-        // Store the posted image URLs for comparison
-        const postedUrls = result.images.map(img => img.url);
-        console.log(`Found ${postedUrls.length} images already posted to Facebook`);
-        // We can use these URLs to mark images as "already posted"
-        // For now, just show a message
-        alert(`Fandt ${result.images.length} billeder allerede postet på Facebook. Systemet vil nu markere duplikater.`);
-      } else {
+      // 1. Fetch FB image URLs
+      const result = await fetchPostedImages(100);
+      if (!result.success) {
         alert('Fejl ved sync: ' + result.error);
+        return;
       }
+      const facebookImageUrls = result.images.map(img => img.url);
+      if (facebookImageUrls.length === 0) {
+        alert('Ingen billeder fundet på Facebook.');
+        return;
+      }
+
+      // 2. Get thumbnails from IndexedDB for each uploaded image, convert to base64
+      const uploadedImages: Array<{ id: string; base64: string }> = [];
+      for (const img of images) {
+        try {
+          const stored = await getImage(img.id);
+          if (stored?.thumbnailBlob) {
+            const base64 = await blobToBase64(stored.thumbnailBlob);
+            uploadedImages.push({ id: img.id, base64 });
+          }
+        } catch {
+          // Skip images that fail to load
+        }
+      }
+
+      if (uploadedImages.length === 0) {
+        alert('Ingen uploadede billeder at sammenligne.');
+        return;
+      }
+
+      // 3. POST to match endpoint
+      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3002';
+      const matchRes = await fetch(`${apiUrl}/api/match-images`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uploadedImages, facebookImageUrls }),
+      });
+      const matchData = await matchRes.json();
+
+      if (!matchData.success) {
+        alert('Fejl ved billedsammenligning: ' + matchData.error);
+        return;
+      }
+
+      // 4. Mark matched images in the store
+      const matchedIds = matchData.matches.map((m: { uploadedImageId: string }) => m.uploadedImageId);
+      if (matchedIds.length > 0) {
+        markAsPostedToMeta(matchedIds);
+      }
+
+      alert(`Sync færdig: ${matchedIds.length} af ${uploadedImages.length} billeder fundet på Facebook.`);
     } catch (err) {
       alert('Fejl: ' + (err as Error).message);
     } finally {
       setIsSyncingWithFacebook(false);
     }
-  }, []);
+  }, [images, markAsPostedToMeta]);
 
   const handlePhaseChange = useCallback(
     (phase: Phase) => {
@@ -418,48 +663,50 @@ export function ContentWorkflow({ campaignId }: ContentWorkflowProps) {
     [updateCampaign]
   );
 
-  // Generate graphics for posts (without redoing text/vision)
-  const handleGenerateGraphics = useCallback(async () => {
-    if (posts.length === 0) return;
+  // Generate a single graphic from Brain's suggestion
+  const handleGenerateSingleGraphic = useCallback(async (dayNumber: number) => {
+    const suggestion = graphicSuggestions.find(s => s.dayNumber === dayNumber);
+    if (!suggestion) return;
 
-    setIsGeneratingGraphics(true);
-    setGraphicsProgress({ current: 0, total: posts.length });
+    // Mark as generating
+    setGraphicSuggestions(prev => prev.map(s =>
+      s.dayNumber === dayNumber ? { ...s, status: 'generating' as const } : s
+    ));
 
     try {
-      // Create suggestions for each post
-      const suggestions: GraphicSuggestion[] = posts.map((post) =>
-        suggestGraphicForPost(post.id, post.dayNumber, post.seed, post.caption)
-      );
+      const result = await generateGraphic({
+        concept: suggestion.concept,
+        headline: suggestion.headline,
+        subtext: suggestion.subtext,
+        style: suggestion.style,
+      });
 
-      // Generate graphics
-      const results = await generateGraphicsForPosts(
-        suggestions,
-        (current, total, _postId) => {
-          setGraphicsProgress({ current, total });
-        }
-      );
+      if (result.success && result.imageBlob) {
+        const blobUrl = createImageUrl(result.imageBlob);
 
-      // Convert blobs to URLs and store
-      const graphics: GeneratedGraphic[] = [];
-      for (const [postId, { blob, description }] of results) {
-        const blobUrl = createImageUrl(blob);
-        const suggestion = suggestions.find((s) => s.postId === postId);
-        graphics.push({
-          postId,
-          dayNumber: suggestion?.dayNumber || 0,
-          blobUrl,
-          description,
-        });
+        // Mark suggestion as done with preview
+        setGraphicSuggestions(prev => prev.map(s =>
+          s.dayNumber === dayNumber ? { ...s, status: 'done' as const, blobUrl } : s
+        ));
       }
-
-      setGeneratedGraphics(graphics);
-      refreshTokenUsage();
     } catch (err) {
-      console.error('Graphics generation failed:', err);
-    } finally {
-      setIsGeneratingGraphics(false);
+      console.error('Single graphic generation failed:', err);
+      // Reset to pending on failure
+      setGraphicSuggestions(prev => prev.map(s =>
+        s.dayNumber === dayNumber ? { ...s, status: 'pending' as const } : s
+      ));
     }
-  }, [posts, refreshTokenUsage]);
+  }, [graphicSuggestions, posts]);
+
+  // Add generated graphic to a post
+  const handleAddGraphicToPost = useCallback((dayNumber: number) => {
+    const suggestion = graphicSuggestions.find(s => s.dayNumber === dayNumber && s.status === 'done');
+    const post = posts.find(p => p.dayNumber === dayNumber);
+
+    if (suggestion?.blobUrl && post) {
+      updatePost(post.id, { generatedGraphicPath: suggestion.blobUrl });
+    }
+  }, [graphicSuggestions, posts, updatePost]);
 
   // Generate hashtags for all posts
   const handleGenerateHashtags = useCallback(() => {
@@ -870,60 +1117,101 @@ export function ContentWorkflow({ campaignId }: ContentWorkflowProps) {
             history={historyContent}
           />
 
-          {/* Graphics Generation Section */}
+          {/* Graphics Queue - Brain's Recommendations */}
           <div className="mt-8 pt-6 border-t border-gray-200 dark:border-gray-700">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <Image className="w-5 h-5 text-purple-500" />
-                <h3 className="text-lg font-medium text-gray-900 dark:text-white">
-                  Genererede Grafik
-                </h3>
-              </div>
-              <button
-                onClick={handleGenerateGraphics}
-                disabled={isGeneratingGraphics || posts.length === 0}
-                className="flex items-center gap-2 px-4 py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Sparkles className="w-4 h-4" />
-                {isGeneratingGraphics
-                  ? `Genererer ${graphicsProgress.current}/${graphicsProgress.total}...`
-                  : 'Generer Grafik'}
-              </button>
+            <div className="flex items-center gap-2 mb-4">
+              <Sparkles className="w-5 h-5 text-purple-500" />
+              <h3 className="text-lg font-medium text-gray-900 dark:text-white">
+                Grafik Anbefalinger
+              </h3>
+              {graphicSuggestions.length > 0 && (
+                <span className="text-sm text-gray-500 dark:text-gray-400">
+                  ({graphicSuggestions.filter(s => s.status === 'done').length}/{graphicSuggestions.length} genereret)
+                </span>
+              )}
             </div>
 
-            <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-              Generer typografi-fokuserede grafik til dage hvor du mangler billeder, eller vil have variation.
-              Grafikken er designet til at IKKE ligne AI - ren typografi og abstrakte former.
-            </p>
-
-            {generatedGraphics.length > 0 ? (
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                {generatedGraphics.map((graphic) => (
+            {graphicSuggestions.length > 0 ? (
+              <div className="space-y-4">
+                <p className="text-sm text-gray-500 dark:text-gray-400">
+                  The Brain har anbefalet grafik til disse dage. Klik &quot;Generer&quot; for at lave dem enkeltvis, og &quot;Tilføj til post&quot; for at knytte dem til opslaget.
+                </p>
+                {graphicSuggestions.map((suggestion) => (
                   <div
-                    key={graphic.postId}
-                    className="bg-gray-50 dark:bg-gray-750 rounded-lg overflow-hidden"
+                    key={suggestion.dayNumber}
+                    className="flex items-start gap-4 p-4 bg-gray-50 dark:bg-gray-750 rounded-lg border border-gray-200 dark:border-gray-600"
                   >
-                    <img
-                      src={graphic.blobUrl}
-                      alt={graphic.description}
-                      className="w-full aspect-square object-cover"
-                    />
-                    <div className="p-2">
-                      <p className="text-xs font-medium text-gray-700 dark:text-gray-300">
-                        Dag {graphic.dayNumber}
-                      </p>
-                      <p className="text-xs text-gray-500 dark:text-gray-400 truncate">
-                        {graphic.description}
-                      </p>
+                    {/* Preview or placeholder */}
+                    <div className="w-24 h-24 flex-shrink-0 rounded-lg overflow-hidden bg-gray-200 dark:bg-gray-600">
+                      {suggestion.blobUrl ? (
+                        <img src={suggestion.blobUrl} alt={suggestion.concept} className="w-full h-full object-cover" />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center">
+                          <Image className="w-8 h-8 text-gray-400 dark:text-gray-500" />
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Info */}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-sm font-medium text-gray-900 dark:text-white">Dag {suggestion.dayNumber}</span>
+                        {suggestion.headline && (
+                          <span className="text-xs text-purple-600 dark:text-purple-400 font-mono">&quot;{suggestion.headline}&quot;</span>
+                        )}
+                      </div>
+                      <p className="text-sm text-gray-700 dark:text-gray-300 mb-1">{suggestion.concept}</p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 italic">{suggestion.reason}</p>
+                      <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">Stil: {suggestion.style}</p>
+                    </div>
+
+                    {/* Actions */}
+                    <div className="flex flex-col gap-2 flex-shrink-0">
+                      {suggestion.status === 'pending' && (
+                        <button
+                          onClick={() => handleGenerateSingleGraphic(suggestion.dayNumber)}
+                          className="px-3 py-1.5 text-sm bg-purple-500 text-white rounded-lg hover:bg-purple-600 transition-colors flex items-center gap-1"
+                        >
+                          <Sparkles className="w-3 h-3" />
+                          Generer
+                        </button>
+                      )}
+                      {suggestion.status === 'generating' && (
+                        <button disabled className="px-3 py-1.5 text-sm bg-purple-400 text-white rounded-lg opacity-75 flex items-center gap-1">
+                          <RefreshCw className="w-3 h-3 animate-spin" />
+                          Genererer...
+                        </button>
+                      )}
+                      {suggestion.status === 'done' && (
+                        <>
+                          <button
+                            onClick={() => handleAddGraphicToPost(suggestion.dayNumber)}
+                            className="px-3 py-1.5 text-sm bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors flex items-center gap-1"
+                          >
+                            <ChevronRight className="w-3 h-3" />
+                            Tilføj til post
+                          </button>
+                          <button
+                            onClick={() => handleGenerateSingleGraphic(suggestion.dayNumber)}
+                            className="px-3 py-1.5 text-sm text-gray-600 dark:text-gray-400 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors flex items-center gap-1"
+                          >
+                            <RefreshCw className="w-3 h-3" />
+                            Generer ny
+                          </button>
+                        </>
+                      )}
                     </div>
                   </div>
                 ))}
               </div>
             ) : (
               <div className="text-center py-8 bg-gray-50 dark:bg-gray-750 rounded-lg">
-                <Image className="w-12 h-12 mx-auto text-gray-300 dark:text-gray-600 mb-2" />
+                <Sparkles className="w-12 h-12 mx-auto text-gray-300 dark:text-gray-600 mb-2" />
                 <p className="text-sm text-gray-500 dark:text-gray-400">
-                  Klik &quot;Generer Grafik&quot; for at lave typografisk grafik til dine posts
+                  The Brain har ikke anbefalet grafik til nogen dage endnu.
+                </p>
+                <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                  Grafik-anbefalinger genereres automatisk under content planlægning.
                 </p>
               </div>
             )}

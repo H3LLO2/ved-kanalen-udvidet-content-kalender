@@ -8,17 +8,19 @@ interface ImageGridProps {
 }
 
 export function ImageGrid({ onImageClick, selectable = true }: ImageGridProps) {
-  const { 
-    images, 
-    selectedIds, 
+  const {
+    images,
+    selectedIds,
     externallyUsedIds,
-    toggleImageSelection, 
-    selectAll, 
-    deselectAll, 
+    postedToMetaIds,
+    toggleImageSelection,
+    selectAll,
+    deselectAll,
     deleteSelected,
     toggleExternallyUsed,
     markSelectedAsExternallyUsed,
     clearExternallyUsed,
+    clearPostedToMeta,
   } = useImageStore();
 
   const handleImageClick = useCallback(
@@ -54,6 +56,7 @@ export function ImageGrid({ onImageClick, selectable = true }: ImageGridProps) {
 
   const selectedCount = selectedIds.size;
   const usedCount = externallyUsedIds.size;
+  const metaCount = postedToMetaIds.size;
   const availableImages = images.filter(img => !externallyUsedIds.has(img.id));
 
   return (
@@ -64,6 +67,7 @@ export function ImageGrid({ onImageClick, selectable = true }: ImageGridProps) {
             <span className="text-sm text-gray-600 dark:text-gray-400">
               {availableImages.length} tilgængelige
               {usedCount > 0 && <span className="text-orange-500"> ({usedCount} brugt tidligere)</span>}
+              {metaCount > 0 && <span className="text-blue-500"> ({metaCount} på Facebook)</span>}
               {selectedCount > 0 && ` • ${selectedCount} valgt`}
             </span>
           </div>
@@ -94,6 +98,14 @@ export function ImageGrid({ onImageClick, selectable = true }: ImageGridProps) {
               </>
             ) : (
               <>
+                {metaCount > 0 && (
+                  <button
+                    onClick={clearPostedToMeta}
+                    className="text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400"
+                  >
+                    Nulstil sync
+                  </button>
+                )}
                 {usedCount > 0 && (
                   <button
                     onClick={clearExternallyUsed}
@@ -118,6 +130,7 @@ export function ImageGrid({ onImageClick, selectable = true }: ImageGridProps) {
         {images.map((image) => {
           const isSelected = selectedIds.has(image.id);
           const isExternallyUsed = externallyUsedIds.has(image.id);
+          const isPostedToMeta = postedToMetaIds.has(image.id);
           const hasAnalysis = !!image.analysisId;
 
           return (
@@ -127,7 +140,7 @@ export function ImageGrid({ onImageClick, selectable = true }: ImageGridProps) {
               className={`
                 relative aspect-square rounded-lg overflow-hidden cursor-pointer
                 transition-all duration-200 group
-                ${isExternallyUsed ? 'opacity-50' : ''}
+                ${isExternallyUsed || isPostedToMeta ? 'opacity-50' : ''}
                 ${isSelected
                   ? 'ring-2 ring-blue-500 ring-offset-2 dark:ring-offset-gray-900'
                   : 'hover:ring-2 hover:ring-gray-300 dark:hover:ring-gray-600'
@@ -184,7 +197,7 @@ export function ImageGrid({ onImageClick, selectable = true }: ImageGridProps) {
               </button>
 
               {/* Analysis indicator */}
-              {hasAnalysis && !isExternallyUsed && (
+              {hasAnalysis && !isExternallyUsed && !isPostedToMeta && (
                 <div className="absolute bottom-2 right-2 w-5 h-5 rounded-full bg-green-500 flex items-center justify-center">
                   <Sparkles className="w-3 h-3 text-white" />
                 </div>
@@ -197,8 +210,15 @@ export function ImageGrid({ onImageClick, selectable = true }: ImageGridProps) {
                 </div>
               )}
 
-              {/* Filename on hover (only if not externally used) */}
-              {!isExternallyUsed && (
+              {/* Posted to Facebook banner */}
+              {isPostedToMeta && !isExternallyUsed && (
+                <div className="absolute bottom-0 left-0 right-0 bg-blue-500 text-white text-xs py-1 text-center">
+                  På Facebook
+                </div>
+              )}
+
+              {/* Filename on hover (only if not marked) */}
+              {!isExternallyUsed && !isPostedToMeta && (
                 <div
                   className="
                     absolute bottom-0 left-0 right-0 p-2
